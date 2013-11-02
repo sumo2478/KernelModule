@@ -107,6 +107,10 @@ static void for_each_open_file(struct task_struct *task,
  */
 static void osprd_process_request(osprd_info_t *d, struct request *req)
 {
+    int offset = req->sector * SECTOR_SIZE; // The offset for the sector we wish to access
+    int size = req->current_nr_sectors * SECTOR_SIZE; // The size of the data we wish to access
+    int flag = rq_data_dir(req);
+
 	if (!blk_fs_request(req)) {
 		end_request(req, 0);
 		return;
@@ -120,8 +124,28 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	// Consider the 'req->sector', 'req->current_nr_sectors', and
 	// 'req->buffer' members, and the rq_data_dir() function.
 
-	// Your code here.
-	eprintk("Should process request...\n");
+    // If the number of sectors left to submit is greater than the number of
+    // sectors in the ramdisk then return an error
+    if (req->sector + req->current_nr_sectors > nsectors) {
+        eprintk("Accessing invalid memory sector\n");
+        end_request(req, 0);
+    }
+    
+    // Determine if its a read or write request and copy the data to
+    // the appropriate buffer
+    if (flag == READ) 
+    {
+        memcpy(req->buffer, d->data + offset, size);
+    }
+    else if (flag == WRITE) 
+    {
+        memcpy(d->data + offset, req->buffer, size);
+    }
+    else
+    {
+        eprintk("Command given was neither a read or write request\n");
+        end_request(req, 0);
+    }
 
 	end_request(req, 1);
 }
