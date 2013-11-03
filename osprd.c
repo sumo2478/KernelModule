@@ -215,7 +215,6 @@ void release_read_lock(osprd_info_t*d)
                 // Set the beginning of the list to the next node of the
                 // current node
                 d->read_lock_holders = curr_node->next;
-                prev_node = d->read_lock_holders;
             }
             // Otherwise set the previous node's next node to the
             // current's next node
@@ -226,7 +225,8 @@ void release_read_lock(osprd_info_t*d)
 
             // Free the memory stored in the current node
             kfree(curr_node);
-            curr_node = prev_node->next;
+            curr_node = NULL;
+            break;
         }else
         {
             prev_node = curr_node;
@@ -291,18 +291,26 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		// as appropriate.
 
 		// Your code here.
-        osp_spin_lock(&d->mutex);
+        
+        // If the file doesn't correspond to the ramdisk then return error
+        if (d == NULL) 
+            return -1;
+
 
         // If there is a lock on the file then release the lock
         if ((filp->f_flags & F_OSPRD_LOCKED) != 0) {
-            if (filp_writable) {
-                release_write_lock(d); 
-            }else {
-                release_read_lock(d);
-            }
-        }
+            osp_spin_lock(&d->mutex);
 
-        osp_spin_unlock(&d->mutex);
+            filp->f_mode &= ~F_OSPRD_LOCKED;
+
+            if (filp_writable) 
+                release_write_lock(d); 
+            else 
+                release_read_lock(d);
+            
+            osp_spin_unlock(&d->mutex);
+
+        }
 	}
 
 	return 0;
@@ -401,27 +409,22 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
                 curr_node = curr_node->next;
             }
 
+            osp_spin_unlock(&d->mutex);
+
             // While the current process cannot obtain a write lock then wait  
-            while ( d->num_write_locks != 0 || 
-                    d->num_read_locks != 0 || 
-                    d->ticket_tail != local_ticket) {
+            int request = wait_event_interruptible(d->blockq, 
+                                                   d->ticket_tail == local_ticket && 
+                                                   d->num_write_locks == 0 && 
+                                                   d->num_read_locks == 0);
 
-                osp_spin_unlock(&d->mutex);
 
-                int request = wait_event_interruptible(d->blockq, 
-                                                       d->ticket_tail == local_ticket && 
-                                                       d->num_write_locks == 0 && 
-                                                       d->num_read_locks == 0);
-                osp_spin_lock(&d->mutex);
-
-                eprintk("Awake...\n");
-                if (request) {
-                    eprintk("Received signal...\n");
-                    osp_spin_unlock(&d->mutex);
-                    return -ERESTARTSYS;
-                }
-
+            eprintk("Awake...\n");
+            if (request) {
+                eprintk("Received signal...\n");
+                return -ERESTARTSYS;
             }
+
+            osp_spin_lock(&d->mutex);
 
             // Give the write lock to the current process
             lock_write(filp, d);
@@ -432,29 +435,27 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
             eprintk("Read -- Spinlock: %d Read Locks: %d Write Locks: %d\n", d->mutex.lock, d->num_read_locks, d->num_write_locks);
 
             // While the current process cannot obtain a read lock then wait
-            while ( d->num_write_locks != 0 || 
-                    d->ticket_tail != local_ticket) {
 
-                osp_spin_unlock(&d->mutex);
+            osp_spin_unlock(&d->mutex);
 
-                int request = wait_event_interruptible(d->blockq, 
-                                                       d->ticket_tail == local_ticket && 
-                                                       d->num_write_locks == 0);
-                eprintk("Awake...\n");
+            int request = wait_event_interruptible(d->blockq, 
+                                                   d->ticket_tail == local_ticket && 
+                                                   d->num_write_locks == 0);
 
-                if (request) {
-                    osp_spin_unlock(&d->mutex);
-                    eprintk("Received Signal...\n");
-                    return -ERESTARTSYS;
-                }
+            eprintk("Awake...\n");
 
-                osp_spin_lock(&d->mutex);
+            if (request) {
+                eprintk("Received Signal...\n");
+                return -ERESTARTSYS;
             }
+
+            osp_spin_lock(&d->mutex);
 
             // Give the read lock to the current process
             lock_read(filp, d);
         }
-    osp_spin_unlock(&d->mutex);
+
+        osp_spin_unlock(&d->mutex);
 
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
 		// EXERCISE: ATTEMPT to lock the ramdisk.
@@ -472,6 +473,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
             if (d->num_write_locks != 0 || 
                 d->num_read_locks != 0 || 
                 d->ticket_tail != d->ticket_head) {
+                osp_spin_unlock(&d->mutex);
 
                 return -EBUSY;
             }
@@ -482,7 +484,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
         {
             if (d->num_write_locks != 0 || 
                 d->ticket_tail != d->ticket_head) {
-
+                osp_spin_unlock(&d->mutex);
                 return -EBUSY;
             }
 
@@ -509,6 +511,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 
         osp_spin_lock(&d->mutex);
 
+        filp->f_flags &= ~F_OSPRD_LOCKED;
+
         // If the process was a write command
         if (filp_writable){
             release_write_lock(d);
@@ -518,7 +522,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
             release_read_lock(d);
         }
 
-        filp->f_flags &= !F_OSPRD_LOCKED;
         osp_spin_unlock(&d->mutex);
 
 	} else
