@@ -427,7 +427,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 
             //eprintk("Preparing to wait for write lock...\n");
 
-            while (d->num_write_locks != 0 || d->num_read_locks != 0) {
+            while (d->num_write_locks != 0 || d->num_read_locks != 0 || d->ticket_tail < local_ticket) {
                // eprintk("Waiting for write lock...\n");
                 osp_spin_unlock(&d->mutex);
 
@@ -461,7 +461,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
             // While the current process cannot obtain a read lock then wait
 
 
-            while (d->num_write_locks != 0) {
+            while (d->num_write_locks != 0 || d->ticket_tail < local_ticket) {
                 osp_spin_unlock(&d->mutex);
 
                 int request = wait_event_interruptible(d->blockq, 
