@@ -20,6 +20,7 @@
 /* The size of an OSPRD sector. */
 #define SECTOR_SIZE	512
 
+#define MAX_PROCESSES 500
 /* This flag is added to an OSPRD file's f_flags to indicate that the file
  * is locked. */
 #define F_OSPRD_LOCKED	0x80000
@@ -62,6 +63,7 @@ pid_list create_node(pid_t pid)
     new_node->next = NULL;
     new_node->pid = pid;
     return new_node;
+
 }
 
 
@@ -88,6 +90,7 @@ typedef struct osprd_info {
     pid_list read_lock_holders;
     int num_write_locks;
     int num_read_locks;
+    int skipped_processes[MAX_PROCESSES];
 
 	// The following elements are used internally; you don't need
 	// to understand them.
@@ -96,6 +99,22 @@ typedef struct osprd_info {
 	                                //   exclusion in the 'queue'.
 	struct gendisk *gd;             // The generic disk.
 } osprd_info_t;
+
+int is_signaled_tail(osprd_info_t* d){
+    int i = 0;
+    while (i < MAX_PROCESSES && d->skipped_processes[i] != -1) {
+        if (d->skipped_processes[i] == d->ticket_tail) {
+            // Remove this number from this list
+            while (d->skipped_processes[i] != -1 && i < MAX_PROCESSES) {
+                d->skipped_processes[i] = d->skipped_processes[i+1];
+                i++;
+            }
+            return 1;
+        }
+        i++;
+    }
+    return 0;
+}
 
 #define NOSPRD 4
 static osprd_info_t osprds[NOSPRD];
@@ -250,6 +269,10 @@ void lock_write(struct file *filp, osprd_info_t *d, int ticket)
 
     if (ticket)
         d->ticket_tail++;
+
+    while (is_signaled_tail(d)) {
+        d->ticket_tail++;
+    }
 }
 
 void lock_read(struct file *filp, osprd_info_t *d, int ticket)
@@ -262,15 +285,13 @@ void lock_read(struct file *filp, osprd_info_t *d, int ticket)
     // Update the ramdisk
     d->num_read_locks++;
 
-    if (ticket) 
-        d->ticket_tail++;
     
     // Add the current process to the end of the read lock holders list
     curr_node = d->read_lock_holders;
     new_node = create_node(current->pid);
 
     if (curr_node == NULL) {
-        curr_node = new_node;
+        d->read_lock_holders = new_node;
     }else
     {
         while (curr_node->next != NULL) {
@@ -278,6 +299,12 @@ void lock_read(struct file *filp, osprd_info_t *d, int ticket)
         }
         
         curr_node->next = new_node;
+    }
+    if (ticket) 
+        d->ticket_tail++;
+
+    while (is_signaled_tail(d)) {
+        d->ticket_tail++;
     }
 }
 
@@ -420,18 +447,28 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
                 curr_node = curr_node->next;
             }
 
-            while (d->num_write_locks != 0 || d->num_read_locks != 0 || d->ticket_tail < local_ticket) {
+            while (d->num_write_locks != 0 || d->num_read_locks != 0 || d->ticket_tail != local_ticket) {
                 osp_spin_unlock(&d->mutex);
 
                 // While the current process cannot obtain a write lock then wait  
                 int request  = wait_event_interruptible(d->blockq, 
-                                                       d->ticket_tail >= local_ticket && 
+                                                       d->ticket_tail == local_ticket && 
                                                        d->num_write_locks == 0 && 
                                                        d->num_read_locks == 0);
 
                 osp_spin_lock(&d->mutex);
                 if (request) {
-                    d->ticket_tail++;
+                    // Add the ticket to the skipped processes array
+                    int i = 0;
+                    while (d->skipped_processes[i] != -1) {
+                        i++; 
+                    }
+                    d->skipped_processes[i] = local_ticket;
+
+                    while (is_signaled_tail(d)) {
+                        d->ticket_tail++;
+                    }
+
                     osp_spin_unlock(&d->mutex);
                     return -ERESTARTSYS;
                 }
@@ -453,7 +490,17 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
                                                        d->num_write_locks == 0);
                 osp_spin_lock(&d->mutex);
                 if (request) {
-                    d->ticket_tail++;
+                    // Add the ticket to the skipped processes array
+                    int i = 0;
+                    while (d->skipped_processes[i] != -1) {
+                        i++; 
+                    }
+                    d->skipped_processes[i] = local_ticket;
+
+                    while (is_signaled_tail(d)) {
+                        d->ticket_tail++;
+                    }
+
                     osp_spin_unlock(&d->mutex);
                     return -ERESTARTSYS;
                 }
@@ -552,6 +599,11 @@ static void osprd_setup(osprd_info_t *d)
     d->read_lock_holders = NULL;
     d->num_write_locks = 0;
     d->num_read_locks = 0;
+
+    int i;
+    for (i = 0; i < MAX_PROCESSES; i++) {
+        d->skipped_processes[i] = -1;
+    }
 }
 
 
