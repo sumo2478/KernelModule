@@ -20,7 +20,8 @@
 /* The size of an OSPRD sector. */
 #define SECTOR_SIZE	512
 
-#define MAX_PROCESSES 500
+#define MAX_PROCESSES 500 // Max number of processes
+
 /* This flag is added to an OSPRD file's f_flags to indicate that the file
  * is locked. */
 #define F_OSPRD_LOCKED	0x80000
@@ -90,7 +91,7 @@ typedef struct osprd_info {
     pid_list read_lock_holders;
     int num_write_locks;
     int num_read_locks;
-    int skipped_processes[MAX_PROCESSES];
+    int skipped_processes[MAX_PROCESSES]; // Stores the skipped processes that were interrupted by a signal
 
 	// The following elements are used internally; you don't need
 	// to understand them.
@@ -100,8 +101,10 @@ typedef struct osprd_info {
 	struct gendisk *gd;             // The generic disk.
 } osprd_info_t;
 
+// Determines whether the tail is currently at a skipped process
 int is_signaled_tail(osprd_info_t* d){
     int i = 0;
+
     while (i < MAX_PROCESSES && d->skipped_processes[i] != -1) {
         if (d->skipped_processes[i] == d->ticket_tail) {
             // Remove this number from this list
@@ -300,6 +303,7 @@ void lock_read(struct file *filp, osprd_info_t *d, int ticket)
         
         curr_node->next = new_node;
     }
+
     if (ticket) 
         d->ticket_tail++;
 
@@ -457,6 +461,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
                                                        d->num_read_locks == 0);
 
                 osp_spin_lock(&d->mutex);
+
+                // If we received a signal
                 if (request) {
                     // Add the ticket to the skipped processes array
                     int i = 0;
@@ -489,6 +495,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
                                                        d->ticket_tail >= local_ticket && 
                                                        d->num_write_locks == 0);
                 osp_spin_lock(&d->mutex);
+
+                // If we received a signal
                 if (request) {
                     // Add the ticket to the skipped processes array
                     int i = 0;
